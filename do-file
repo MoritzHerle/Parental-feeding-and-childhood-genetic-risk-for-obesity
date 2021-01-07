@@ -1,0 +1,498 @@
+**** adopting Micali et al's interventional disparity measure
+**** following discussion with Rhian Daniel regarding the implementation of the estimation
+**** (as described in the appendix)
+**** BDS, 17/09/2020
+/* the setting is:
+	X=cont, M= 3 continuous factors, Y=cont
+	--> we also use categorical X
+	time-fixed confounders:
+		-1 only continuous, mat BMI (C2)
+		-1 only for the X-Y relations (Mat Ed)
+		
+******EDITED AGAIN BY BDS ON 22/11/2020 TO INCLUDE THE "ONE CATEGORY DOWN" EFFECT
+(have kept the program for the primary analyses, they are at the bottom )
+*/
+
+
+clear all
+cap log close
+set more off
+set seed 200608
+
+label variable PF1 "Emotional Feeding"
+label variable PF2 "Restriction"
+label variable PF3 "Pressure to eat"
+pwcorr zPRScs PF* bmi12,sig obs
+
+*tidying up the variables
+replace PF3 = PF3*-1
+gen id=ID
+gen x= zPRScs
+gen y= bmi12
+gen m = PF2
+gen c1= sex==2
+gen c2= prebmi
+gen c3 = matedbin 
+gen l1=PF1
+gen l2=PF3 
+su y m x
+tab1 c1 c3
+su c2
+*centering prebmi
+replace c2=c2-23
+su l1 l2 
+keep id-l2
+
+*missing data?
+misstable summarize
+misstable pattern id x y m c1 c2 c3 l1 l2 
+*analyses based on complete records
+gen to_keep= x<.& y<.& m<. & c1<. & c2<. & c3<. & l1<. & l2<. 
+ta to_keep
+keep if to_keep==1
+
+
+*standardize x internally to facilitate the meaning of 0 and 1
+/*egen zx=std(x)
+su zx x
+gen x_old=x
+replace x=zx
+des */
+egen zm=std(m)
+egen zl1=std(l1)
+egen zl2=std(l2)
+su z*
+replace m=zm
+replace l1=zl1
+replace l2=zl2
+corr x l1 l2 m y
+
+
+*create non-linear terms for the regression models
+foreach var of varlist m l1 l2  {
+  gen `var'sq=`var'^2
+}
+*Interaction terms (for cont X)
+gen mx=m*x
+foreach n of numlist 1/2{
+	  gen l`n'x=l`n'*x
+      gen c`n'_x=c`n'*x
+}
+gen c3_x = c3*x
+gen c1_c3 = c1 * c3 
+
+*mediator-confounders interactions
+foreach n of numlist 1/2{
+    foreach m of numlist 1/3{
+      gen l`n'c`m'=l`n'*c`m'
+    }
+}
+*confounder-confounder interactions
+foreach n of numlist 1/2{
+ 	  local l=`n'+1
+      foreach m of numlist `l'/2{
+		if `n'<3 {
+		gen c`n'_c`m'=c`n'*c`m'
+		}
+	}	
+}
+
+su m*
+su c*
+su l*
+
+*categorise X and create interactions
+egen xcat=cut(x), group(5) label
+ta xcat
+foreach c of numlist 0/4{
+	gen l1x_`c'=l1*(xcat==`c')
+	gen l2x_`c'=l2*(xcat==`c')
+	gen mx_`c'=m*(xcat==`c')
+	gen c1x_`c'=c1*(xcat==`c')
+	gen c2x_`c'=c2*(xcat==`c')
+	gen c3x_`c'=c3*(xcat==`c')
+}
+
+
+
+
+
+*****************************************************************************************************************
+* INTERVENTIONAL DISPARITY MEASURE (as in Micali 2018) BUT WITH A "ONE STEP DOWN" COMPARISON
+*****************************************************************************************************************
+cap program drop interventional_disp_1down 
+cap program define interventional_disp_1down, rclass
+	
+*****************************************************************************************************
+*MONTE CARLO STEPS
+******************************************************************************************************
+cap drop U*
+cap drop de
+cap drop l1_*
+cap drop l2_*
+cap drop m_*
+cap drop y_*
+
+preserve
+expand 1000
+*expand 1
+
+sort id
+by id:gen original=_n==1
+
+****************************** 3 mediators***************************
+*L1
+ regress l1 i.xcat if original==1,base
+ gen UL1=rnormal(0,1)
+  *NOTE THAT NOW WE COMPUTE THE POTENTIAL MEDIATORS UNDER ALL LEVELS OF X
+gen l1_0 = _b[_cons] +e(rmse)*UL1
+ foreach j of numlist 1/4{
+  gen l1_`j' = _b[_cons]+ _b[`j'.xcat]+e(rmse)*UL1	
+  }
+su UL1 l1_*
+
+
+*L2
+ regress l2 l1 i.xcat if original==1
+ gen UL2=rnormal(0,1)
+*NOTE THAT NOW WE COMPUTE THE POTENTIAL MEDIATORS UNDER ALL LEVELS OF X
+gen l2_0 = _b[_cons] +_b[l1]*l1_0+e(rmse)*UL2
+ foreach j of numlist 1/4{
+  gen l2_`j' = _b[_cons]+ _b[`j'.xcat]+_b[l1]*l1_`j'+e(rmse)*UL2	
+  }
+su UL2 l2_*
+
+
+*M at different levels of x and L1 and L2
+*regress m i.xcat l1 l1x_1 l1x_2 l1x_3 l1x_4 l2 l2x_1 l2x_2 l2x_3 l2x_4  if original==1
+ regress m i.xcat l1  l2  if original==1
+ gen UM=rnormal(0,1)
+*NOTE THAT NOW WE COMPUTE THE POTENTIAL MEDIATORS UNDER ALL LEVELS OF X
+ gen m_0 = _b[_cons]+ _b[l1]*l1_0 +_b[l2]*l2_0+e(rmse)*UM
+ foreach j of numlist 1/4{
+  gen m_`j' = _b[_cons]+ _b[`j'.xcat]+_b[l1]*l1_`j'+_b[l2]*l2_`j'+e(rmse)*UL2	
+  }
+su m_*
+ 
+
+******************************MODEL for Y ***************************************************
+#delimit;
+regress y 
+	i.xcat 
+	l1 l1x_1 l1x_2 l1x_3 l1x_4
+	l2 l2x_1 l2x_2 l2x_3 l2x_4
+	m mx_1 mx_2 mx_3 mx_4
+	l1sq l2sq msq
+	c1 c2 c3
+	c1x_1 c1x_2 c1x_3 c1x_4
+	c2x_1 c2x_2 c2x_3 c2x_4
+	c3x_1 c3x_2 c3x_3 c3x_4
+	c1_c2 c1_c3 c2_c3  
+	if original==1
+; 
+#delimit cr
+
+gen UY=rnormal(0,1)
+
+********************************************************************************
+* Y at different levels of X, at the same category as the mediators and also one category higher
+* the first index refers to the value set for X and the second index is for M
+********************************************************************************
+*to calculate Y(M*_0|X=0)	
+#delimit;
+	gen y_00
+		=_b[_cons]
+			+_b[l1]*l1_0 
+			+_b[l2]*l2_0 
+			+_b[m]*m_0 
+			+_b[l1sq]*l1_0^2+_b[l2sq]*l2_0^2+_b[msq]*m_0^2
+			+_b[c1]*c1+_b[c2]*c2+_b[c3]*c3
+			+_b[c1_c2]*c1*c2+_b[c1_c3]*c1*c3+_b[c2_c3]*c2*c3
+			+e(rmse)*UY;
+	#delimit cr	
+
+*to calculate Y(M*_0|X=1)	
+#delimit;
+	gen y_10
+		=_b[_cons] +_b[1.xcat]
+			+_b[l1]*l1_0 
+			+_b[l2]*l2_0 
+			+_b[m]*m_0 
+			+_b[l1sq]*l1_0^2+_b[l2sq]*l2_0^2+_b[msq]*m_0^2
+			+_b[l1x_1]*l1_0
+			+_b[l2x_1]*l2_0
+			+_b[mx_1]*m_0
+			+_b[c1x_1]*c1
+			+_b[c2x_1]*c2
+			+_b[c3x_1]*c3
+			+_b[c1]*c1+_b[c2]*c2+_b[c3]*c3
+			+_b[c1_c2]*c1*c2+_b[c1_c3]*c1*c3+_b[c2_c3]*c2*c3
+			+e(rmse)*UY;
+#delimit cr	
+
+*to calculate Y(M*_j|X=(j+1))	
+foreach  j of numlist 1/3 {   /*j index for mediators , a for X*/
+local a=`j'+1
+#delimit;
+	gen y_`a'`j'
+		=_b[_cons]+_b[`a'.xcat]
+			+_b[l1]*l1_`j' 	
+			+_b[l2]*l2_`j' 
+			+_b[m]*m_`j'
+			+_b[l1sq]*l1_`j'^2+_b[l2sq]*l2_`j'^2+_b[msq]*m_`j'^2
+			+_b[l1x_`a']*l1_`j'
+			+_b[l2x_`a']*l2_`j'
+			+_b[mx_`a']*m_`j'
+			+_b[c1x_`a']*c1	
+			+_b[c2x_`a']*c2	
+			+_b[c3x_`a']*c3	
+			+_b[c1]*c1+_b[c2]*c2+_b[c3]*c3
+			+_b[c1_c2]*c1*c2+_b[c1_c3]*c1*c3+_b[c2_c3]*c2*c3
+			+e(rmse)*UY;
+#delimit cr	
+ }
+
+*to calculate Y(M*_j|X=j))	
+foreach  j of numlist 1/3 {   /*j index for mediators , a for X*/
+local a=`j'
+#delimit;
+	gen y_`a'`j'
+		=_b[_cons]
+			+_b[`a'.xcat]
+			+_b[l1]*l1_`j' 
+			+_b[l2]*l2_`j' 
+			+_b[m]*m_`j' 
+			+_b[l1sq]*l1_`j'^2+_b[l2sq]*l2_`j'^2+_b[msq]*m_`j'^2
+			+_b[l1x_`a']*l1_`j'
+			+_b[l2x_`a']*l2_`j'
+			+_b[mx_`a']*m_`j'
+			+_b[c1x_`a']*c1	
+			+_b[c2x_`a']*c2	
+			+_b[c3x_`a']*c3	
+			+_b[c1]*c1+_b[c2]*c2+_b[c3]*c3
+			+_b[c1_c2]*c1*c2+_b[c1_c3]*c1*c3+_b[c2_c3]*c2*c3
+			+e(rmse)*UY;
+#delimit cr	
+ }
+ su y y_*	
+
+
+*********************TCE with saturated model****************************************
+********************************************************************************
+
+reg y i.xcat c3 if original==1
+*E(0) and E(1)
+cap drop Y_* dif
+
+gen Y_0= _b[_cons]+_b[c3]*c3
+foreach  a of numlist 1/4 {
+gen Y_`a'= _b[_cons]+_b[`a'.xcat]+_b[c3]*c3
+}
+su y y_* Y_*
+
+
+********************************RESULTS **********************************
+*NB: the first number refers to X and the second number refers to M
+
+
+foreach  j of numlist 0/3 {
+local a=`j'+1
+	gen de_`a'`j'=y_`a'`j'-y_`j'`j'
+	gen tce_`a'`j'=Y_`a'-Y_`j'
+	gen dif_`a'`j'=tce_`a'`j'-de_`a'`j'
+}
+
+gen de_ave = (de_10 + de_21 + de_32+ de_43)/4 
+
+foreach  j of numlist 0/3 {
+local a=`j'+1
+	su de_`a'`j'
+	return scalar de_`a'`j'=r(mean)
+}
+
+foreach  j of numlist 0/3 {
+local a=`j'+1
+	summ tce_`a'`j'
+	return scalar tce_`a'`j'=r(mean)
+}
+
+foreach  j of numlist 0/3 {
+local a=`j'+1
+	summ dif_`a'`j'
+	return scalar dif_`a'`j'=r(mean)
+}
+
+su de_ave
+return scalar de_ave=r(mean)  
+
+scalar list
+restore
+
+end
+*******************************************************************************
+
+bootstrap  CDM_10=r(de_10)  CDM_21=r(de_21)  CDM_32=r(de_32)  CDM_43=r(de_43) ///
+           TCE10=r(tce_10) TCE21=r(tce_21) TCE32=r(tce_32)  TCE43=r(tce_43) ///
+           DIF10=r(dif_10) DIF21=r(dif_21) DIF32=r(dif_32)  DIF43=r(dif_43) ///
+		   DE_AVE=r(de_ave), reps(1000): interventional_disp_1down
+
+
+
+
+
+
+*****************************************************************************************************************
+* INTERVENTIONAL DISPARITY MEASURE (as in Micali 2018): J == 0 
+*****************************************************************************************************************
+cap program drop interventional_disp 
+cap program define interventional_disp, rclass
+	
+*****************************************************************************************************
+*MONTE CARLO STEPS
+******************************************************************************************************
+cap drop U*
+cap drop de
+cap drop l1_*
+cap drop l2_*
+cap drop m_*
+cap drop y_*
+
+preserve
+expand 1000
+
+sort id
+by id:gen original=_n==1
+
+****************************** 3 mediators***************************
+*L1
+ regress l1 i.xcat if original==1
+ gen UL1=rnormal()
+ gen l1_0 = _b[_cons] +e(rmse)*UL1
+
+
+*L2
+ regress l2 l1 i.xcat if original==1
+ gen UL2=rnormal()
+ gen l2_0 = _b[_cons] +_b[l1]*l1_0+e(rmse)*UL2
+
+
+*M at different levels of x and L1 and L2
+regress m i.xcat l1 l1x_1 l1x_2 l1x_3 l1x_4 l2 l2x_1 l2x_2 l2x_3 l2x_4  if original==1
+* regress m b2.xcat l1  l2  if original==1
+ gen UM=rnormal()
+ gen m_0 = _b[_cons]+ _b[l1]*l1_0 +_b[l2]*l2_0+e(rmse)*UM
+ 
+ su l1 l1_0 l2 l2_0 m m_0
+
+
+******************************MODEL for Y ***************************************************
+#delimit;
+regress y 
+	i.xcat 
+	l1  l1x_1 l1x_2 l1x_3 l1x_4
+	l2  l2x_1 l2x_2 l2x_3 l2x_4
+	m  mx_1 mx_2 mx_3 mx_4
+	l1sq l2sq msq
+	c1 c2 c3
+	c1x_1 c1x_2 c1x_3 c1x_4
+	c2x_1 c2x_2 c2x_3 c2x_4
+	c3x_1 c3x_2 c3x_3 c3x_4
+	c1_c2 c1_c3 c2_c3   if original==1
+; 
+#delimit cr
+
+
+* Y at different levels of X but L1, L2 and M are at their Potential value when X=2
+* the first index refers to the value set for X and the second index is for M
+gen UY=rnormal()
+#delimit;
+		gen y_00
+		=_b[_cons]
+			+_b[l1]*l1_0 
+			+_b[l2]*l2_0 
+			+_b[m]*m_0 
+			+_b[l1sq]*l1_0^2+_b[l2sq]*l2_0^2+_b[msq]*m_0^2
+			+_b[c1]*c1+_b[c2]*c2+_b[c3]*c3
+			+_b[c1_c2]*c1*c2+_b[c1_c3]*c1*c3+_b[c2_c3]*c2*c3
+			+e(rmse)*UY;
+	#delimit cr	
+
+foreach  a of numlist 1,2,3,4 {
+#delimit;
+		gen y_`a'0
+		=_b[_cons]
+			+_b[`a'.xcat]
+			+_b[l1]*l1_0 +_b[l1x_`a']*l1_0 	
+			+_b[l2]*l2_0 +_b[l2x_`a']*l2_0 	
+			+_b[m]*m_0 +_b[mx_`a']*m_0 
+			+_b[l1sq]*l1_0^2+_b[l2sq]*l2_0^2+_b[msq]*m_0^2
+			+_b[c1]*c1+_b[c2]*c2+_b[c3]*c3
+			+_b[c1x_`a']*c1	
+			+_b[c2x_`a']*c2	
+			+_b[c3x_`a']*c3	
+			+_b[c1_c2]*c1*c2+_b[c1_c3]*c1*c3+_b[c2_c3]*c2*c3
+			+e(rmse)*UY;
+			#delimit cr	
+ }
+
+su y y_*	
+
+
+*********************TCE with saturated model****************************************
+
+reg y i.xcat c3 if original==1
+*E(0) and E(1)
+cap drop Y_* dif
+
+gen Y_0= _b[_cons]+_b[c3]*c3
+foreach  a of numlist 1,2,3,4 {
+gen Y_`a'= _b[_cons]+_b[`a'.xcat]+_b[c3]*c3
+}
+su y y_* Y_*
+
+
+********************************RESULTS **********************************
+*CDM:only X set to exposed versus none, conditional draws
+*NB: the first number refers to X and the second number refers to M
+
+foreach  a of numlist 1,2,3,4  {
+	gen de_`a'0=y_`a'0-y_00
+	gen tce_`a'=Y_`a'-Y_0
+	gen dif_`a'0=tce_`a'-de_`a'0
+}
+
+
+foreach  a of numlist 1,2,3,4 {
+	summ de_`a'0 
+	return scalar de_`a'0=r(mean)
+}
+
+ foreach a of numlist 1,2,3,4 {      
+	summ tce_`a'
+	return scalar tce_`a'=r(mean)
+}
+
+
+foreach  a of numlist 1,2,3,4{
+	summ dif_`a'0
+	return scalar dif_`a'0=r(mean)
+}
+
+restore
+
+end
+*******************************************************************************
+
+
+*interventional_disp
+
+bootstrap   CDM1=r(de_10) TCE1=r(tce_1) ///
+			CDM2=r(de_20) TCE2=r(tce_2) ///
+			CDM3=r(de_30) TCE3=r(tce_3) ///
+			CDM4=r(de_40) TCE4=r(tce_4)  ///
+            DIF0=r(dif_10) DIF1=r(dif_20) ///
+		    DIF3=r(dif_30) DIF4=r(dif_40)  ///
+	        , reps(1000): interventional_disp
+
+ex
+

@@ -1,4 +1,4 @@
-**** adopting Micali et al's interventional disparity measure
+**** adopting Micali et al's interventional disparity measure, PMID: 30188380
 **** following discussion with Rhian Daniel regarding the implementation of the estimation
 **** (as described in the appendix)
 **** BDS, 17/09/2020
@@ -329,6 +329,8 @@ restore
 
 end
 *******************************************************************************
+*** bootstrapping of resulsts *************************************************
+
 
 bootstrap  CDM_10=r(de_10)  CDM_21=r(de_21)  CDM_32=r(de_32)  CDM_43=r(de_43) ///
            TCE10=r(tce_10) TCE21=r(tce_21) TCE32=r(tce_32)  TCE43=r(tce_43) ///
@@ -481,9 +483,9 @@ restore
 
 end
 *******************************************************************************
+*** bootstrapping of resulsts *************************************************
 
 
-*interventional_disp
 
 bootstrap   CDM1=r(de_10) TCE1=r(tce_1) ///
 			CDM2=r(de_20) TCE2=r(tce_2) ///
